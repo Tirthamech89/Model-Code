@@ -1,0 +1,413 @@
+library(readr)
+library(dplyr)
+library(party)
+library(rpart)
+library(rpart.plot)
+library(ROCR)
+library(caTools)
+library(caret)
+library(xgboost)
+library(stringr)
+library(e1071)
+library(randomForest)
+#library(mlbench)
+library(plyr)
+library(mice)
+library(VIM)
+library(nnet)
+
+
+data_tr<-read.csv('C:/Users/Tirthankar/Desktop/Av/mck1/train.csv')
+summary(data_tr)
+data_te<-read.csv('C:/Users/Tirthankar/Desktop/Av/mck1/test.csv')
+summary(data_te)
+
+full_dt<-rbind(data_tr%>%select(-c(stroke,id)),data_te%>%select(-c(id)))
+glimpse(full_dt)
+md.pattern(full_dt)
+
+full_dt$smoking_status <- as.character(full_dt$smoking_status)
+full_dt$smoking_status[full_dt$smoking_status==""] <- NA
+full_dt$smoking_status <- as.factor(full_dt$smoking_status)
+summary(full_dt)
+
+
+full_dt$hypertension <- as.factor(full_dt$hypertension)
+full_dt$heart_disease <- as.factor(full_dt$heart_disease)
+
+#Missing Value Imputation
+
+imputed_Data <- mice(full_dt, m=5, maxit = 10, method = 'cart', seed = 500)
+summary(imputed_Data)
+all_data1<-complete(imputed_Data)
+summary(all_data1)
+glimpse(all_data1)
+
+train<-all_data1[1:43400,]
+test<-all_data1[43401:62001,]
+
+train_y<-subset(data_tr, select=c(stroke))
+train_all<-cbind(train,train_y)
+
+#Split
+set.seed(123876)
+split = sample.split(train_all$stroke, SplitRatio = 0.7)
+train_new = subset(train_all, split == TRUE)
+test_new = subset(train_all, split == FALSE) 
+table(train_new$stroke)/nrow(train_new)
+table(test_new$stroke)/nrow(test_new)
+
+train_new$stroke <- as.factor(train_new$stroke)
+test_new$stroke <- as.factor(test_new$stroke)
+
+#Model1: XGboost
+
+y<-as.matrix(train_new$stroke)
+ytest<-as.matrix(test_new$stroke)
+dropevent<- names(train_new) %in% c('stroke') 
+x <- train_new[!dropevent]
+xtest <- test_new[!dropevent]
+
+x1<-as.matrix(x)
+x1test<-as.matrix(xtest)
+
+
+dtrain<- xgb.DMatrix(data.matrix(x),label=y)
+dtest<- xgb.DMatrix(data.matrix(xtest),label=ytest)
+
+param <- list("objective" = "binary:logistic",
+              "eval_metric" = "auc", 
+              "nthread" = 8, 
+              "max_depth" = 8 , 
+              "eta" = 0.01, 
+              "gamma"=1,
+              "subsample"=0.7, 
+              "min_child_weight" = 1, 
+              "colsample_bytree"=1) 
+set.seed(1234)#k-fold cross validation
+nround.cv=250
+bst.cv <-xgb.cv(param=param,data=dtrain,nfold=10,nround=nround.cv,prediction = T,verbose = T)#index of maximum AUC
+min.error.idx <-which.max(bst.cv$evaluation_log[,test_auc_mean])
+min.error.idx
+
+bst <- xgboost(param=param, data=dtrain,nrounds=min.error.idx, verbose=1,prediction=T)
+pred <- predict(bst, dtrain)
+pred_test <- predict(bst, dtest)
+
+pred_train1<-data.frame(pred)
+pred_test1<-data.frame(pred_test)
+
+y1<-subset(train_new, select=c(stroke))
+ytest1<-subset(test_new, select=c(stroke))
+
+chk_train<-cbind(pred_train1,y1)
+chk_test<-cbind(pred_test1,ytest1)
+
+
+AUC <- function(pred,depvar){require(ROCR)  
+  p <- prediction(as.numeric(pred),depvar)  
+  auc<- performance(p,"auc")  
+  auc <- unlist(slot(auc,"y.values"))  
+  return (auc)}
+
+AUC(chk_train$pred,chk_train$stroke)
+#0.9012846
+AUC(chk_test$pred_test,chk_test$stroke)
+#0.8501986
+
+
+#hold out data:xgb
+x1_test_og<-data.matrix(test)
+pred_test_og <- predict(bst, x1_test_og)
+pred_test_og1<-data.frame(pred_test_og)
+names(pred_test_og1)[1] <- "xgb_pred"
+
+
+#model data:xgb
+x1_model<-data.matrix(train)
+pred_model_og <- predict(bst, x1_model)
+pred_model_og1<-data.frame(pred_model_og)
+names(pred_model_og1)[1] <- "xgb_pred"
+
+
+#Model2: ANN
+
+normalize <- function(x,na.rm = TRUE) 
+{  return (
+  (x - min(x,na.rm = TRUE)) / (max(x,na.rm = TRUE) - min(x,na.rm = TRUE))
+)}
+final_data1 <- 
+  as.data.frame(
+    lapply(all_data1%>%select(c(age,avg_glucose_level,bmi)), 
+           normalize))
+
+final_data2<-subset(all_data1, select=-c(age,avg_glucose_level,bmi))
+final_data<-cbind(final_data1,final_data2)
+
+train1<-final_data[1:43400,]
+test1<-final_data[43401:62001,]
+
+train_y<-subset(data_tr, select=c(stroke))
+train_all<-cbind(train1,train_y)
+
+
+set.seed(123876)
+split = sample.split(train_all$stroke, SplitRatio = 0.7)
+train_nn = subset(train_all, split == TRUE)
+test_nn = subset(train_all, split == FALSE) 
+table(train_nn$stroke)/nrow(train_nn)
+table(test_nn$stroke)/nrow(test_nn)
+
+
+train_nn$stroke <- as.factor(train_nn$stroke)
+test_nn$stroke <- as.factor(test_nn$stroke)
+
+drops1 <- c("stroke")
+train_nn2<- train_nn[,!names(train_nn) %in% drops1]
+train_nn2_mat<-data.matrix(train_nn2, rownames.force = NA)
+train_y<-subset(train_nn, select=stroke)
+
+train_y$y0<-ifelse(train_y$stroke==0,1,0)
+train_y$y1<-ifelse(train_y$stroke==1,1,0)
+drop_demo_all <- names(train_y) %in% c("stroke")
+train_y <- train_y[!drop_demo_all]
+train_y1_all<-data.matrix(train_y, rownames.force = NA)
+
+mod.nn<-nnet(train_nn2_mat, 
+             train_y1_all, 
+             size=30, 
+             softmax = FALSE,
+             rang = 0.1, 
+             decay = 0.1, 
+             maxit = 1500,
+             seed=123876)
+
+train_nn2_mat$predicted.response <- predict(mod.nn,train_nn2_mat)
+pt_xy<-train_nn2_mat$predicted.response
+resp_x1<-as.data.frame(pt_xy)
+new_y<-subset(train_nn, select=stroke)
+final_pred<-cbind(resp_x1,new_y)
+
+AUC(final_pred$y1,final_pred$stroke)
+#0.8499728
+
+test_nn2<- test_nn[,!names(test_nn) %in% drops1]
+test_nn2_mat<-data.matrix(test_nn2, rownames.force = NA)
+
+test_nn2_mat$predicted.response <- predict(mod.nn,test_nn2_mat)
+pt_xy_test<-test_nn2_mat$predicted.response
+resp_x1_test<-as.data.frame(pt_xy_test)
+new_y_test<-subset(test_nn, select=stroke)
+final_pred_test<-cbind(resp_x1_test,new_y_test)
+AUC(final_pred_test$y1,final_pred_test$stroke)
+#0.850283
+
+
+#hold out data:nn
+test_nn2_org<-data.matrix(test1, rownames.force = NA)
+test_nn2_org$predicted.response <- predict(mod.nn,test_nn2_org)
+pt_org_test<-test_nn2_org$predicted.response
+pt_org_test1<-as.data.frame(pt_org_test)
+pred_nn<-subset(pt_org_test1,select=y1)
+names(pred_nn)[1] <- "nn_pred"
+
+
+#model data:nn
+test_nn2_model<-data.matrix(train1, rownames.force = NA)
+test_nn2_model$predicted.response <- predict(mod.nn,test_nn2_model)
+pt_org_model<-test_nn2_model$predicted.response
+pt_org_model1<-as.data.frame(pt_org_model)
+pred_model_nn<-subset(pt_org_model1,select=y1)
+names(pred_model_nn)[1] <- "nn_pred"
+
+
+#Model3: Random Forest
+
+varNames <- names(x)
+varNames1 <- paste(varNames, collapse = "+")
+rf.form <- as.formula(paste("stroke", varNames1, sep = " ~ "))
+
+cross.sell.rf <- randomForest(rf.form,
+                              train_new, 
+                              mtry=10, 
+                              ntree=100, 
+                              importance=T, 
+                              do.trace=T,
+                              nodesize=10,
+                              seed=123876)
+t <- as.data.frame(predict(cross.sell.rf,x,"prob"))
+t1<-as.data.frame(t[,2:2])
+names(t1)[1] <- "pred"
+
+new_y_rf<-subset(train_new, select=stroke)
+final_pred_rf<-cbind(t1,new_y_rf)
+AUC(final_pred_rf$pred,final_pred_rf$stroke)
+#0.9998842
+
+t_test <- as.data.frame(predict(cross.sell.rf,xtest,"prob"))
+t_test1<-as.data.frame(t_test[,2:2])
+names(t_test1)[1] <- "pred"
+
+new_y_rf_test<-subset(test_new, select=stroke)
+final_pred_rf_test<-cbind(t_test1,new_y_rf_test)
+AUC(final_pred_rf_test$pred,final_pred_rf_test$stroke)
+#0.7577608
+
+
+#hold out data:rf
+org_test_rf <- as.data.frame(predict(cross.sell.rf,test,"prob"))
+pred_rf<-as.data.frame(org_test_rf[,2:2])
+names(pred_rf)[1] <- "rf_pred"
+
+#model data:rf
+org_model_rf <- as.data.frame(predict(cross.sell.rf,train,"prob"))
+pred_model_rf<-as.data.frame(org_model_rf[,2:2])
+names(pred_model_rf)[1] <- "rf_pred"
+
+#Model4:Naive Bayes
+
+model_nb <- naiveBayes(rf.form,  data=train_new)
+
+preds_nb <- as.data.frame(predict(model_nb, newdata = x, type = "raw"))
+t1_nb<-as.data.frame(preds_nb[,2:2])
+names(t1_nb)[1] <- "pred"
+
+new_y_nb<-subset(train_new, select=stroke)
+final_pred_nb<-cbind(t1_nb,new_y_nb)
+AUC(final_pred_nb$pred,final_pred_nb$stroke)
+#0.8309005
+
+t_test_nb <- as.data.frame(predict(model_nb,newdata=xtest, type = "raw"))
+t_test1_nb<-as.data.frame(t_test_nb[,2:2])
+names(t_test1_nb)[1] <- "pred"
+
+new_y_nb_test<-subset(test_new, select=stroke)
+final_pred_nb_test<-cbind(t_test1_nb,new_y_nb_test)
+AUC(final_pred_nb_test$pred,final_pred_nb_test$stroke)
+#0.8410521
+
+#hold out data:nb
+org_test_nb <- as.data.frame(predict(model_nb,newdata=test,type = "raw"))
+pred_nb<-as.data.frame(org_test_nb[,2:2])
+names(pred_nb)[1] <- "nb_pred"
+
+
+#model data:nb
+org_model_nb <- as.data.frame(predict(model_nb, train, type = "raw"))
+pred_model_nb<-as.data.frame(org_model_nb[,2:2])
+names(pred_model_nb)[1] <- "nb_pred"
+
+#Model5: Logistics Regression
+
+model_lr <- glm(stroke ~.,family=binomial(link='logit'),data=train_new)
+summary(model_lr)
+
+pred_lr <- predict(model_lr, newdata = x, type = "response")
+pred_lr1<-as.data.frame(pred_lr)
+names(pred_lr1)[1] <- "pred"
+
+new_y_lr<-subset(train_new, select=stroke)
+final_pred_lr<-cbind(pred_lr1,new_y_lr)
+AUC(final_pred_lr$pred,final_pred_lr$stroke)
+#0.8503155
+
+pred_lr_test <- predict(model_lr, newdata = xtest, type = "response")
+pred_lr1_test<-as.data.frame(pred_lr_test)
+names(pred_lr1_test)[1] <- "pred"
+
+new_y_lr_test<-subset(test_new, select=stroke)
+final_pred_lr_test<-cbind(pred_lr1_test,new_y_lr_test)
+AUC(final_pred_lr_test$pred,final_pred_lr_test$stroke)
+#0.8546791
+
+#hold out data:lr
+pred_lr_test_og <- predict(model_lr, newdata = test, type = "response")
+pred_lr<-as.data.frame(pred_lr_test_og)
+names(pred_lr)[1] <- "lr_pred"
+
+#model data:lr
+pred_lr_model_og <- predict(model_lr, newdata = train, type = "response")
+pred_model_lr<-as.data.frame(pred_lr_model_og)
+names(pred_model_lr)[1] <- "lr_pred"
+
+#Model: Stacking
+
+stack_model1<-cbind(pred_model_og1,pred_model_nn,pred_model_rf,pred_model_nb,pred_model_lr)
+stack_model2<-subset(data_tr, select=c(stroke))
+stack_model<-cbind(stack_model1,stack_model2)
+
+AUC(stack_model$xgb_pred,stack_model$stroke)#0.8862938
+AUC(stack_model$nn_pred,stack_model$stroke)#0.8501124
+AUC(stack_model$rf_pred,stack_model$stroke)#0.9361925
+AUC(stack_model$lr_pred,stack_model$stroke)#0.8516685
+AUC(stack_model$nb_pred,stack_model$stroke)#0.8339324
+
+hold_out_dt<-cbind(pred_test_og1,pred_nn,pred_rf,pred_nb,pred_lr)
+
+set.seed(238761)
+split = sample.split(stack_model$stroke, SplitRatio = 1)
+train_new_stck = subset(stack_model, split == TRUE)
+#test_new_stck = subset(stack_model, split == FALSE) 
+table(train_new_stck$stroke)/nrow(train_new_stck)
+#table(test_new_stck$stroke)/nrow(test_new_stck)
+
+
+train_new_stck$stroke <- as.factor(train_new_stck$stroke)
+#test_new_stck$stroke <- as.factor(test_new_stck$stroke)
+
+y_stck<-as.matrix(train_new_stck$stroke)
+#ytest_stck<-as.matrix(test_new_stck$stroke)
+dropevent<- names(train_new_stck) %in% c('stroke') 
+x_stck <- train_new_stck[!dropevent]
+#xtest_stck <- test_new_stck[!dropevent]
+
+
+x1_stck<-as.matrix(x_stck)
+#x1test_stck<-as.matrix(xtest_stck)
+
+
+dtrain_st<- xgb.DMatrix(data.matrix(x_stck),label=y_stck)
+#dtest_st<- xgb.DMatrix(data.matrix(xtest_stck),label=ytest_stck)
+
+param <- list("objective" = "binary:logistic",
+              "eval_metric" = "auc", 
+              "nthread" = 8, 
+              "max_depth" = 10, 
+              "eta" = 0.01, 
+              "gamma"=1,
+              "subsample"=1, 
+              "min_child_weight" = 0, 
+              "colsample_bytree"=1) 
+set.seed(1234)#k-fold cross validation
+nround.cv=500
+bst.cv_st <-xgb.cv(param=param,data=dtrain_st,nfold=10,nround=nround.cv,prediction = T,verbose = T)#index of maximum AUC
+min.error.idx_st <-which.max(bst.cv_st$evaluation_log[,test_auc_mean])
+min.error.idx_st
+
+bst_st <- xgboost(param=param, data=dtrain_st,nrounds=min.error.idx_st, verbose=1,prediction=T)
+pred_st <- predict(bst_st, dtrain_st)
+#pred_test_st <- predict(bst_st, dtest_st)
+
+pred_train1_st<-data.frame(pred_st)
+#pred_test1_st<-data.frame(pred_test_st)
+
+y1_st<-subset(train_new_stck, select=c(stroke))
+#ytest1_st<-subset(test_new_stck, select=c(stroke))
+
+chk_train_st<-cbind(pred_train1_st,y1_st)
+#chk_test_st<-cbind(pred_test1_st,ytest1_st)
+
+AUC(chk_train_st$pred_st,chk_train_st$stroke)
+#0.9715745
+#AUC(chk_test_st$pred_test_st,chk_test_st$stroke)
+#0.9575301
+
+hld_stck<-data.matrix(hold_out_dt)
+pred_hld <- predict(bst_st, hld_stck)
+pred_hld1<-data.frame(pred_hld)
+names(pred_hld1)[1] <- "stroke"
+
+#tr_id<-subset(data_te, select=c(id))
+all_stack_result<-cbind(tr_id,pred_hld1)
+
+write.csv(all_stack_result,'C:/Users/Tirthankar/Desktop/Av/mck1/stack_result.csv', row.names=FALSE)

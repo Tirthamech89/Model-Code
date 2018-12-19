@@ -1,0 +1,84 @@
+import keras
+from keras.datasets import cifar10
+from keras.preprocessing.image import ImageDataGenerator
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Activation, Flatten
+from keras.layers import Conv2D, MaxPooling2D
+import os
+import tarfile
+from skimage.io import imread_collection
+import pandas as pd
+import numpy as np
+
+
+batch_size = 32
+num_classes = 10
+epochs = 10
+#data_augmentation = True
+save_dir = os.path.join(os.getcwd(), 'saved_models')
+model_name = 'keras_cifar10_trained_model.h5'
+
+col_dir = 'C:/Users/pf416e/Desktop/AV/apparel/train/*.png'
+col = imread_collection(col_dir)
+x_train=np.asarray(col)
+
+df = pd.read_csv('C:/Users/pf416e/Desktop/AV/apparel/train.csv')
+y_train = keras.utils.to_categorical(df[['label']], num_classes)
+
+model = Sequential()
+model.add(Conv2D(32, (3, 3), padding='same',
+                 input_shape=x_train.shape[1:]))
+model.add(Activation('relu'))
+model.add(Conv2D(32, (3, 3)))
+model.add(Activation('relu'))
+model.add(MaxPooling2D(pool_size=(2, 2)))
+model.add(Dropout(0.25))
+
+model.add(Conv2D(64, (3, 3), padding='same'))
+model.add(Activation('relu'))
+model.add(Conv2D(64, (3, 3)))
+model.add(Activation('relu'))
+model.add(MaxPooling2D(pool_size=(2, 2)))
+model.add(Dropout(0.25))
+
+model.add(Flatten())
+model.add(Dense(512))
+model.add(Activation('relu'))
+model.add(Dropout(0.5))
+model.add(Dense(num_classes))
+model.add(Activation('softmax'))
+
+# initiate RMSprop optimizer
+opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
+
+model.compile(loss='categorical_crossentropy',
+              optimizer=opt,
+              metrics=['accuracy'])
+x_train = x_train.astype('float32')
+
+x_train /= 255
+model.fit(x_train, y_train,
+              batch_size=batch_size,
+              epochs=epochs,
+              shuffle=True)
+              
+if not os.path.isdir(save_dir):
+    os.makedirs(save_dir)
+model_path = os.path.join(save_dir, model_name)
+model.save(model_path)
+print('Saved trained model at %s ' % model_path)
+
+col_dir_test = 'C:/Users/pf416e/Desktop/AV/apparel/test/*.png'
+col_test = imread_collection(col_dir_test)
+x_test=np.asarray(col_test)
+
+classes = model.predict(x_test, batch_size=32)
+class_labels = np.argmax(classes, axis=1)
+class_labels_dt=pd.DataFrame(class_labels)
+class_labels_dt.columns=['label']
+
+df_test = pd.read_csv('C:/Users/pf416e/Desktop/AV/apparel/test.csv')
+frames=[df_test,class_labels_dt]
+result = pd.concat(frames,axis=1)
+
+result.to_csv('C:/Users/pf416e/Desktop/AV/apparel/out1.csv')
